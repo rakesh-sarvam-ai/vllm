@@ -43,12 +43,9 @@ ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
 
 
 @pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module relies on V0 internals, so set VLLM_USE_V1=0.
-    """
-    if not current_platform.is_cpu():
-        monkeypatch.setenv('VLLM_USE_V1', '0')
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
 @pytest.mark.parametrize(
@@ -176,10 +173,11 @@ def test_compressed_tensors_w8a8_logprobs(
 
     dtype = "bfloat16"
 
-    # skip language translation prompt for the static per tensor asym model
-    if (model_path ==
-            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym"
-        ):  # noqa: E501
+    # skip language translation prompt for the static per tensor models
+    if model_path in (
+            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Sym",
+            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym",
+    ):
         example_prompts = example_prompts[0:-1]
 
     with hf_runner(model_path, dtype=dtype) as hf_model:
@@ -359,6 +357,9 @@ def test_compressed_tensors_fp8(vllm_runner):
         assert output
 
 
+@pytest.mark.skipif(
+    not current_platform.is_kv_cache_dtype_supported("fp8", None),
+    reason="FP8 KV cache is not supported on this device.")
 @pytest.mark.skipif(not current_platform.is_cuda(),
                     reason="This test is skipped on non-CUDA platform.")
 def test_compressed_tensors_kv_cache(vllm_runner):
@@ -719,3 +720,25 @@ def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         print(output)
         assert output
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(),
+                    reason="This test is skipped on non-CUDA platform.")
+@pytest.mark.parametrize("model,prompt,exp_perplexity", [
+    (
+        "nm-testing/Llama-3.2-1B-Instruct-spinquantR1R2R4-w4a16",
+        "Flat is better than nested.\nSparse is better than dense.",
+        150.0,
+    ),
+    (
+        "nm-testing/Llama-3.2-1B-Instruct-quip-w4a16",
+        "Flat is better than nested.\nSparse is better than dense.",
+        150.0,
+    ),
+])
+def test_compressed_tensors_transforms_perplexity(vllm_runner, model, prompt,
+                                                  exp_perplexity):
+    with vllm_runner(model, enforce_eager=True) as llm:
+        perplexity = llm.generate_prompt_perplexity([prompt])[0]
+        print(perplexity)
+        assert perplexity <= exp_perplexity
